@@ -1,0 +1,4 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {position,TYPES} from '../src/domain.js';
+import {supportsAutomaticQuote} from '../src/services/marketQuoteService.js';
+test('calcula preço médio e provento',()=>{const asset={id:'a',quote:1500};const result=position(asset,[{assetId:'a',type:TYPES.BUY,date:'2026-01-01',quantity:100,value:100000,fees:0},{assetId:'a',type:TYPES.INCOME,date:'2026-02-01',quantity:0,value:5000,fees:0}]);assert.equal(result.current,150000);assert.equal(result.totalReturn,55000)});
+test('identifica os ativos cobertos pela atualização automática',()=>{assert.equal(supportsAutomaticQuote({class:'Ações',ticker:'PETR4'}),true);assert.equal(supportsAutomaticQuote({class:'FIIs',ticker:'MXRF11'}),true);assert.equal(supportsAutomaticQuote({class:'Renda fixa',ticker:'TESOURO'}),false);assert.equal(supportsAutomaticQuote({class:'ETFs',ticker:''}),false)});
