@@ -4,6 +4,7 @@ import './AppAuth.css';
 import { supabase } from './lib/supabase.js';
 import { TYPES, money, pct, portfolio } from './domain.js';
 import { emptyPortfolio } from './data.js';
+import { loadPortfolio as loadPortfolioFromDb, persistPortfolio } from './services/portfolioService.js';
 import {
   fetchBrapiAsset,
   fetchBrapiQuotes,
@@ -65,39 +66,10 @@ function App() {
 
       setPortfolioLoading(true);
       try {
-        const { data: row, error } = await supabase
-          .from('portfolios')
-          .select('data')
-          .eq('user_id', session.user.id)
-          .maybeSingle();
-
-        if (error) throw error;
+        const loaded = await loadPortfolioFromDb(session.user.id);
         if (!active) return;
+        setData(normalizePortfolio(loaded));
 
-        if (row?.data) {
-          setData(normalizePortfolio(row.data));
-        } else {
-          let localData = null;
-          try {
-            localData = JSON.parse(localStorage.getItem('minha-carteira-v1') || 'null');
-          } catch {
-            localData = null;
-          }
-
-          const initialData = normalizePortfolio(
-            localData && !localData.demo ? localData : emptyPortfolio
-          );
-          setData(initialData);
-
-          const { error: insertError } = await supabase
-            .from('portfolios')
-            .upsert(
-              { user_id: session.user.id, data: initialData },
-              { onConflict: 'user_id' }
-            );
-
-          if (insertError) throw insertError;
-        }
       } catch (error) {
         if (active) {
           setNotice(error.message || 'Não foi possível carregar sua carteira.');
@@ -125,19 +97,12 @@ function App() {
       return;
     }
 
-    const { error } = await supabase
-      .from('portfolios')
-      .upsert(
-        { user_id: session.user.id, data: next },
-        { onConflict: 'user_id' }
-      );
-
-    if (error) {
-      setNotice(`Erro ao salvar a carteira: ${error.message}`);
-      return;
+    try {
+      await persistPortfolio(session.user.id, next);
+      localStorage.setItem('minha-carteira-v1', JSON.stringify(next));
+    } catch (error) {
+      setNotice(`Erro ao salvar a carteira: ${error.message || 'erro desconhecido'}`);
     }
-
-    localStorage.setItem('minha-carteira-v1', JSON.stringify(next));
   };
 
   const handleSignOut = async () => {
