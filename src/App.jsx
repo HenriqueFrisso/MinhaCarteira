@@ -1,41 +1,27 @@
-
-
-import { useMemo, useState } from 'react';
-
+import { useEffect, useMemo, useState } from 'react';
+import Login from './Login.jsx';
+import './AppAuth.css';
+import { supabase } from './lib/supabase.js';
 import { TYPES, money, pct, portfolio } from './domain.js';
-
 import { emptyPortfolio } from './data.js';
-
 import {
-
   fetchBrapiAsset,
-
   fetchBrapiQuotes,
-
-
 } from './services/marketQuoteService.js';
 
-const KEY = 'minha-carteira-v1';
-
 const cents = value =>
+  Math.round(Number(String(value ?? '0').replace(',', '.')) * 100);
 
-  Math.round(
-
-    Number(String(value ?? '0').replace(',', '.')) * 100
-
-  );
-
-const initial = () => {
-
-  const stored = JSON.parse(localStorage.getItem(KEY) || 'null');
-
-  return stored?.demo ? emptyPortfolio : stored || emptyPortfolio;
-
-};
+const normalizePortfolio = value => ({
+  assets: Array.isArray(value?.assets) ? value.assets : [],
+  operations: Array.isArray(value?.operations) ? value.operations : [],
+});
 
 function App() {
-
-  const [data, setData] = useState(initial);
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [portfolioLoading, setPortfolioLoading] = useState(false);
+  const [data, setData] = useState(normalizePortfolio(emptyPortfolio));
 
   const [page, setPage] = useState('Início');
 
@@ -45,21 +31,149 @@ function App() {
 
   const [updating, setUpdating] = useState(false);
 
+  useEffect(() => {
+    let active = true;
+
+    supabase.auth.getSession().then(({ data: result, error }) => {
+      if (error) console.error('Falha ao recuperar sessão:', error);
+      if (active) {
+        setSession(result?.session ?? null);
+        setAuthLoading(false);
+      }
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setAuthLoading(false);
+    });
+
+    return () => {
+      active = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadPortfolio() {
+      if (!session?.user?.id) {
+        setData(normalizePortfolio(emptyPortfolio));
+        setPortfolioLoading(false);
+        return;
+      }
+
+      setPortfolioLoading(true);
+      try {
+        const { data: row, error } = await supabase
+          .from('portfolios')
+          .select('data')
+          .eq('user_id', session.user.id)
+          .maybeSingle();
+
+        if (error) throw error;
+        if (!active) return;
+
+        if (row?.data) {
+          setData(normalizePortfolio(row.data));
+        } else {
+          let localData = null;
+          try {
+            localData = JSON.parse(localStorage.getItem('minha-carteira-v1') || 'null');
+          } catch {
+            localData = null;
+          }
+
+          const initialData = normalizePortfolio(
+            localData && !localData.demo ? localData : emptyPortfolio
+          );
+          setData(initialData);
+
+          const { error: insertError } = await supabase
+            .from('portfolios')
+            .upsert(
+              { user_id: session.user.id, data: initialData },
+              { onConflict: 'user_id' }
+            );
+
+          if (insertError) throw insertError;
+        }
+      } catch (error) {
+        if (active) {
+          setNotice(error.message || 'Não foi possível carregar sua carteira.');
+          setData(normalizePortfolio(emptyPortfolio));
+        }
+      } finally {
+        if (active) setPortfolioLoading(false);
+      }
+    }
+
+    loadPortfolio();
+    return () => { active = false; };
+  }, [session?.user?.id]);
+
   const summary = useMemo(
-
     () => portfolio(data.assets, data.operations),
-
     [data]
-
   );
 
-  const save = next => {
-
+  const save = async next => {
     setData(next);
 
-    localStorage.setItem(KEY, JSON.stringify(next));
+    if (!session?.user?.id) {
+      setNotice('Sua sessão expirou. Entre novamente para salvar as alterações.');
+      return;
+    }
 
+    const { error } = await supabase
+      .from('portfolios')
+      .upsert(
+        { user_id: session.user.id, data: next },
+        { onConflict: 'user_id' }
+      );
+
+    if (error) {
+      setNotice(`Erro ao salvar a carteira: ${error.message}`);
+      return;
+    }
+
+    localStorage.setItem('minha-carteira-v1', JSON.stringify(next));
   };
+
+  const handleSignOut = async () => {
+    const { error } = await supabase.auth.signOut();
+    if (error) setNotice(error.message || 'Não foi possível sair da conta.');
+  };
+
+  if (authLoading) {
+    return <div className="app-loading"><span className="loading-spinner" />Verificando sua sessão…</div>;
+  }
+
+  if (!session) {
+    return (
+      <Login
+        onLogin={({ email, password }) =>
+          supabase.auth.signInWithPassword({ email, password })
+        }
+        onRegister={({ name, email, password }) =>
+          supabase.auth.signUp({
+            email,
+            password,
+            options: { data: { full_name: name } },
+          })
+        }
+        onForgotPassword={({ email }) =>
+          supabase.auth.resetPasswordForEmail(email, {
+            redirectTo: `${window.location.origin}/redefinir-senha`,
+          })
+        }
+      />
+    );
+  }
+
+  if (portfolioLoading) {
+    return <div className="app-loading"><span className="loading-spinner" />Carregando sua carteira…</div>;
+  }
 
   const updateQuotes = async () => {
 
@@ -140,63 +254,107 @@ function App() {
   };
 
   const saveAsset = value => {
+
     const quantity = Number(
+
       String(value.quantity ?? '').replace(',', '.')
+
     );
 
     const averagePrice = cents(value.averagePrice);
 
     const asset = {
+
       id: edit?.id || crypto.randomUUID(),
+
       name: String(value.name || '').trim(),
+
       ticker: String(value.ticker || '').trim().toUpperCase(),
+
       class: value.class,
+
       quantity,
+
       averagePrice,
+
       quote:
+
         typeof value.quote === 'number'
+
           ? value.quote
+
           : averagePrice,
+
       quoteDate:
+
         value.quoteDate || new Date().toISOString().slice(0, 10),
+
       quoteSource: value.quoteSource || 'manual',
+
       quoteUpdatedAt: value.quoteUpdatedAt || null,
+
     };
 
     if (
+
       !asset.name ||
+
       !asset.ticker ||
+
       !asset.class ||
+
       !Number.isFinite(quantity) ||
+
       quantity <= 0 ||
+
       !Number.isFinite(averagePrice) ||
+
       averagePrice <= 0
+
     ) {
+
       setNotice(
+
         'Informe um ativo válido, a quantidade e o preço médio de compra.'
+
       );
+
       return;
+
     }
 
     const assets = edit?.id
+
       ? data.assets.map(item =>
+
           item.id === asset.id
+
             ? { ...item, ...asset }
+
             : item
+
         )
+
       : [...data.assets, asset];
 
     save({
+
       ...data,
+
       assets,
+
     });
 
     setEdit(null);
+
     setPage('Carteira');
 
     setNotice(
+
       edit?.id ? 'Ativo atualizado.' : 'Ativo cadastrado.'
+
     );
+
   };
 
   const remove = asset => {
@@ -401,8 +559,10 @@ function App() {
 
         </div>
 
-        <button
-
+        <div className="header-actions">
+          <span className="user-email">{session.user.email}</span>
+          <button className="signout-button" onClick={handleSignOut}>Sair</button>
+          <button
           aria-label="Alternar tema"
 
           onClick={() =>
@@ -414,9 +574,8 @@ function App() {
         >
 
           ☾
-
-        </button>
-
+          </button>
+        </div>
       </header>
 
       {content}
@@ -814,172 +973,297 @@ function Assets({
 }
 
 function AssetForm({ asset, save, cancel }) {
+
   const [ticker, setTicker] = useState(asset.ticker || '');
+
   const [assetInfo, setAssetInfo] = useState(
+
     asset.id
+
       ? {
+
           ticker: asset.ticker,
+
           name: asset.name,
+
           class: asset.class,
+
           quote: asset.quote ?? null,
+
           quoteDate: asset.quoteDate,
+
           quoteUpdatedAt: asset.quoteUpdatedAt,
+
           quoteSource: asset.quoteSource || 'manual',
+
         }
+
       : null
+
   );
+
   const [quantity, setQuantity] = useState(
+
     asset.quantity != null ? String(asset.quantity) : ''
+
   );
+
   const [averagePrice, setAveragePrice] = useState(
+
     asset.averagePrice != null
+
       ? (asset.averagePrice / 100).toFixed(2)
+
       : asset.quote != null
+
         ? (asset.quote / 100).toFixed(2)
+
         : ''
+
   );
+
   const [searching, setSearching] = useState(false);
+
   const [error, setError] = useState('');
 
   const searchAsset = async () => {
+
     if (!ticker.trim()) {
+
       setError('Informe o código do ativo.');
+
       return;
+
     }
 
     setSearching(true);
+
     setError('');
+
     setAssetInfo(null);
 
     try {
+
       const result = await fetchBrapiAsset(ticker);
+
       setAssetInfo(result);
 
       if (!averagePrice && result.quote != null) {
+
         setAveragePrice((result.quote / 100).toFixed(2));
+
       }
+
     } catch (err) {
+
       setError(err.message || 'Não foi possível consultar o ativo.');
+
     } finally {
+
       setSearching(false);
+
     }
+
   };
 
   const submit = event => {
+
     event.preventDefault();
 
     if (!assetInfo) {
+
       setError('Busque o ativo pelo código antes de salvar.');
+
       return;
+
     }
 
     save({
+
       ...assetInfo,
+
       quantity,
+
       averagePrice,
+
     });
+
   };
 
   const currentQuote = assetInfo?.quote;
 
   return (
+
     <>
+
       <div className="title-action">
+
         <h2>{asset.id ? 'Editar ativo' : 'Cadastrar ativo'}</h2>
 
         <button type="button" onClick={cancel}>
+
           Cancelar
+
         </button>
+
       </div>
 
       <form onSubmit={submit}>
+
         <label>
+
           Código do ativo
 
           <div className="actions">
+
             <input
+
               name="ticker"
+
               value={ticker}
+
               required
+
               onChange={event => {
+
                 setTicker(event.target.value.toUpperCase());
+
                 setAssetInfo(null);
+
                 setError('');
+
               }}
+
               placeholder="Ex.: PETR4, MXRF11, IVVB11"
+
             />
 
             <button
+
               type="button"
+
               className="primary compact"
+
               onClick={searchAsset}
+
               disabled={!ticker.trim() || searching}
+
             >
+
               {searching ? 'Buscando…' : 'Buscar'}
+
             </button>
+
           </div>
+
         </label>
 
         {assetInfo && (
+
           <section className="asset-info">
+
             <p>
+
               <strong>Nome:</strong> {assetInfo.name}
+
             </p>
+
             <p>
+
               <strong>Classe:</strong> {assetInfo.class}
+
             </p>
+
             <p>
+
               <strong>Cotação atual:</strong>{' '}
+
               {currentQuote == null
+
                 ? 'Indisponível'
+
                 : money(currentQuote)}
+
             </p>
+
           </section>
+
         )}
 
         <label>
+
           Quantidade
 
           <input
+
             name="quantity"
+
             type="number"
+
             required
+
             min="0.000001"
+
             step="any"
+
             value={quantity}
+
             onChange={event => setQuantity(event.target.value)}
+
             placeholder="Ex.: 100"
+
           />
+
         </label>
 
         <label>
+
           Preço médio de compra (R$)
 
           <input
+
             name="averagePrice"
+
             type="number"
+
             required
+
             min="0.01"
+
             step="0.01"
+
             value={averagePrice}
+
             onChange={event => setAveragePrice(event.target.value)}
+
             placeholder="Ex.: 32.50"
+
           />
+
         </label>
 
         <p className="hint">
+
           O nome, a classe e a cotação são consultados pela Brapi.
+
           Informe sua quantidade e seu preço médio de compra.
+
         </p>
 
         {error && <p className="error" role="alert">{error}</p>}
 
         <button className="primary" type="submit" disabled={!assetInfo || searching}>
+
           {asset.id ? 'Salvar alterações' : 'Cadastrar ativo'}
+
         </button>
+
       </form>
+
     </>
+
   );
+
 }
 
 function Move({ assets, save }) {
@@ -1232,7 +1516,7 @@ function Settings({ data, save }) {
 
   const clear = () => {
 
-    if (window.confirm('Apagar todos os dados locais?')) {
+    if (window.confirm('Apagar todos os dados da sua carteira?')) {
 
       save(emptyPortfolio);
 
@@ -1284,7 +1568,7 @@ function Settings({ data, save }) {
 
       >
 
-        Apagar dados locais
+        Apagar dados da carteira
 
       </button>
 

@@ -1,0 +1,47 @@
+.app-loading {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: var(--text, #52645a);
+  background: var(--background, #f6f8f6);
+  font: 500 14px/1.5 system-ui, sans-serif;
+}
+.loading-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #d9e8df;
+  border-top-color: #078760;
+  border-radius: 50%;
+  animation: app-auth-spin .7s linear infinite;
+}
+@keyframes app-auth-spin { to { transform: rotate(360deg); } }
+header .header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+header .user-email {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--muted, #718078);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+header .signout-button {
+  padding: 8px 12px;
+  border: 1px solid var(--border, #dce5df);
+  border-radius: 9px;
+  background: var(--surface, #fff);
+  color: var(--text, #24342b);
+  font-size: 12px;
+  font-weight: 600;
+}
+header .signout-button:hover { border-color: #078760; color: #078760; }
+@media (max-width: 600px) {
+  header .user-email { display: none; }
+  header .header-actions { gap: 6px; }
+}
