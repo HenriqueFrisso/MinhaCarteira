@@ -1,3 +1,4 @@
+import { supabase } from '../lib/supabase.js';
 
 const BRAPI_URL = 'https://brapi.dev/api/quote';
 const MARKET_CLASSES = new Set(['Ações', 'FIIs', 'ETFs']);
@@ -23,10 +24,12 @@ async function requestBrapi(url) {
 
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
-      throw new Error('A API exige um token válido ou acesso ao recurso.');
+      throw new Error(
+        'A API exige um token válido ou acesso ao recurso.'
+      );
     }
 
-    throw new Error(`Erro ao consultar a brapi (${response.status}).`);
+    throw new Error(`Erro ao consultar a Brapi (${response.status}).`);
   }
 
   return response.json();
@@ -54,13 +57,91 @@ function normalizeClass(item) {
   return null;
 }
 
-export async function fetchBrapiAsset(ticker) {
-  const symbol = ticker.trim().toUpperCase();
+function mapDatabaseAsset(row) {
+  return {
+    ativoId: row.id,
+    ticker: row.ticker,
+    name: row.nome || row.ticker,
+    class: row.classe,
+    // O banco armazena em reais; a interface utiliza centavos.
+    quote:
+      row.cotacao_atual == null
+        ? null
+        : Math.round(Number(row.cotacao_atual) * 100),
+    quoteDate: row.data_cotacao
+      ? String(row.data_cotacao).slice(0, 10)
+      : new Date().toISOString().slice(0, 10),
+    quoteUpdatedAt:
+      row.atualizado_em || row.data_cotacao || null,
+    quoteSource: row.fonte_cotacao || 'supabase',
+  };
+}
 
-  if (!symbol) {
-    throw new Error('Informe o código do ativo.');
+async function findAssetInSupabase(symbol) {
+  const { data, error } = await supabase
+    .from('ativos')
+    .select(`
+      id,
+      ticker,
+      nome,
+      classe,
+      cotacao_atual,
+      data_cotacao,
+      fonte_cotacao,
+      atualizado_em
+    `)
+    .eq('ticker', symbol)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      `Não foi possível consultar o ativo no Supabase: ${error.message}`
+    );
   }
 
+  return data;
+}
+
+async function saveAssetInSupabase(asset) {
+  const row = {
+    ticker: asset.ticker,
+    nome: asset.name,
+    classe: asset.class,
+    moeda: 'BRL',
+    cotacao_atual:
+      asset.quote == null ? null : asset.quote / 100,
+    data_cotacao: asset.quoteDate
+      ? `${asset.quoteDate}T12:00:00.000Z`
+      : null,
+    fonte_cotacao: asset.quoteSource || 'brapi',
+    atualizado_em: asset.quoteUpdatedAt || new Date().toISOString(),
+  };
+
+  const { data, error } = await supabase
+    .from('ativos')
+    .upsert(row, { onConflict: 'ticker' })
+    .select(`
+      id,
+      ticker,
+      nome,
+      classe,
+      cotacao_atual,
+      data_cotacao,
+      fonte_cotacao,
+      atualizado_em
+    `)
+    .single();
+
+  if (error) {
+    throw new Error(
+      `O ativo foi encontrado na Brapi, mas não foi possível salvá-lo no Supabase: ${error.message}`
+    );
+  }
+
+  return mapDatabaseAsset(data);
+}
+
+async function fetchAssetFromBrapi(symbol) {
   const quoteUrl = new URL(
     `${BRAPI_URL}/${encodeURIComponent(symbol)}`
   );
@@ -105,7 +186,7 @@ export async function fetchBrapiAsset(ticker) {
   const now = new Date().toISOString();
 
   return {
-    ticker: quote.symbol,
+    ticker: quote.symbol.toUpperCase(),
     name: quote.longName || quote.shortName || symbol,
     class: assetClass,
     quote:
@@ -123,6 +204,28 @@ export async function fetchBrapiAsset(ticker) {
   };
 }
 
+/**
+ * Primeiro consulta o Supabase.
+ * A Brapi só é consultada quando o ticker ainda não está cadastrado.
+ */
+export async function fetchBrapiAsset(ticker) {
+  const symbol = String(ticker || '').trim().toUpperCase();
+
+  if (!symbol) {
+    throw new Error('Informe o código do ativo.');
+  }
+
+  const existingAsset = await findAssetInSupabase(symbol);
+
+  if (existingAsset) {
+    return mapDatabaseAsset(existingAsset);
+  }
+
+  const assetFromBrapi = await fetchAssetFromBrapi(symbol);
+
+  return saveAssetInSupabase(assetFromBrapi);
+}
+
 export const supportsAutomaticQuote = asset =>
   MARKET_CLASSES.has(asset.class) &&
   Boolean(asset.ticker?.trim());
@@ -138,7 +241,6 @@ export async function fetchBrapiQuotes(assets) {
   const quotes = [];
   let failed = 0;
 
-  // O plano gratuito permite consultar apenas um ticker por requisição.
   for (const asset of supported) {
     const symbol = asset.ticker.trim().toUpperCase();
 
@@ -177,11 +279,7 @@ export async function fetchBrapiQuotes(assets) {
       });
     } catch (error) {
       failed++;
-
-      console.warn(
-        `Falha ao atualizar ${symbol}:`,
-        error.message
-      );
+      console.warn(`Falha ao atualizar ${symbol}:`, error.message);
     }
   }
 
