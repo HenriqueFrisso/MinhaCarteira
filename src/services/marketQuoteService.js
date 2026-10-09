@@ -134,62 +134,59 @@ export async function fetchBrapiQuotes(assets) {
     return { quotes: [], skipped: assets.length };
   }
 
-  const url = new URL(
-    `${BRAPI_URL}/${supported
-      .map(asset => asset.ticker.trim().toUpperCase())
-      .join(',')}`
-  );
-
-  if (import.meta.env.VITE_BRAPI_TOKEN) {
-    url.searchParams.set(
-      'token',
-      import.meta.env.VITE_BRAPI_TOKEN
-    );
-  }
-
-  const response = await fetch(url, {
-    headers: { Accept: 'application/json' },
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      response.status === 401 || response.status === 403
-        ? 'A API exige um token configurado.'
-        : `Não foi possível obter cotações (${response.status}).`
-    );
-  }
-
-  const body = await response.json();
-  const bySymbol = new Map(
-    (body.results || []).map(item => [
-      item.symbol?.toUpperCase(),
-      item,
-    ])
-  );
-
   const now = new Date().toISOString();
+  const quotes = [];
+  let failed = 0;
 
-  return {
-    skipped: assets.length - supported.length,
-    quotes: supported.flatMap(asset => {
-      const item = bySymbol.get(
-        asset.ticker.trim().toUpperCase()
+  // O plano gratuito permite consultar apenas um ticker por requisição.
+  for (const asset of supported) {
+    const symbol = asset.ticker.trim().toUpperCase();
+
+    const url = new URL(
+      `${BRAPI_URL}/${encodeURIComponent(symbol)}`
+    );
+
+    if (import.meta.env.VITE_BRAPI_TOKEN) {
+      url.searchParams.set(
+        'token',
+        import.meta.env.VITE_BRAPI_TOKEN
+      );
+    }
+
+    try {
+      const body = await requestBrapi(url);
+
+      const item = (body.results || []).find(
+        result => result.symbol?.toUpperCase() === symbol
       );
 
-      return typeof item?.regularMarketPrice === 'number'
-        ? [{
-            id: asset.id,
-            quote: Math.round(
-              item.regularMarketPrice * 100
-            ),
-            quoteDate:
-              item.regularMarketTime?.slice(0, 10) ||
-              now.slice(0, 10),
-            quoteUpdatedAt:
-              item.regularMarketTime || now,
-            quoteSource: 'brapi',
-          }]
-        : [];
-    }),
+      if (typeof item?.regularMarketPrice !== 'number') {
+        failed++;
+        console.warn(`Cotação não encontrada para ${symbol}.`);
+        continue;
+      }
+
+      quotes.push({
+        id: asset.id,
+        quote: Math.round(item.regularMarketPrice * 100),
+        quoteDate:
+          item.regularMarketTime?.slice(0, 10) ||
+          now.slice(0, 10),
+        quoteUpdatedAt: item.regularMarketTime || now,
+        quoteSource: 'brapi',
+      });
+    } catch (error) {
+      failed++;
+
+      console.warn(
+        `Falha ao atualizar ${symbol}:`,
+        error.message
+      );
+    }
+  }
+
+  return {
+    quotes,
+    skipped: assets.length - quotes.length,
   };
 }
